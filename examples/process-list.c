@@ -36,11 +36,11 @@
 
 #include <libvmi/libvmi.h>
 
-volatile bool interrupted = false;
+int interrupted = 0;
 
 void handle_sigint(int sig) {
     printf("Received SIGINT %d, exiting...\n", sig);
-    interrupted = true;
+    interrupted = 1;
 }
 
 int main (int argc, char **argv)
@@ -59,6 +59,7 @@ int main (int argc, char **argv)
     uint8_t init = VMI_INIT_DOMAINNAME, config_type = VMI_CONFIG_GLOBAL_FILE_ENTRY;
     void *input = NULL, *config = NULL;
     int retcode = 1;
+    int i = 0;
 
     if ( argc < 2 ) {
         printf("Usage: %s\n", argv[0]);
@@ -211,92 +212,84 @@ int main (int argc, char **argv)
             goto error_exit;
     }
 
-    cur_list_entry = list_head;
-    if (VMI_FAILURE == vmi_read_addr_va(vmi, cur_list_entry, 0, &next_list_entry)) {
-        printf("Failed to read next pointer at %"PRIx64"\n", cur_list_entry);
-        goto error_exit;
-    }
-
-    if (VMI_OS_FREEBSD == os || VMI_OS_OSX == os) {
-        // FreeBSD's p_list is not circularly linked
-        list_head = 0;
-        // Advance the pointer once
-        status = vmi_read_addr_va(vmi, cur_list_entry, 0, &cur_list_entry);
-        if (status == VMI_FAILURE) {
+    while(!interrupted){
+        cur_list_entry = list_head;
+        if (VMI_FAILURE == vmi_read_addr_va(vmi, cur_list_entry, 0, &next_list_entry)) {
             printf("Failed to read next pointer at %"PRIx64"\n", cur_list_entry);
-            goto error_exit;
+            continue;
         }
+
+        if (VMI_OS_FREEBSD == os || VMI_OS_OSX == os) {
+            // FreeBSD's p_list is not circularly linked
+            list_head = 0;
+            // Advance the pointer once
+            status = vmi_read_addr_va(vmi, cur_list_entry, 0, &cur_list_entry);
+            if (status == VMI_FAILURE) {
+                printf("Failed to read next pointer at %"PRIx64"\n", cur_list_entry);
+                continue;
+            }
+        }
+
+            /* walk the task list */
+        while (!interrupted) {
+
+            current_process = cur_list_entry - tasks_offset;
+
+            /* Note: the task_struct that we are looking at has a lot of
+            * information.  However, the process name and id are burried
+            * nice and deep.  Instead of doing something sane like mapping
+            * this data to a task_struct, I'm just jumping to the location
+            * with the info that I want.  This helps to make the example
+            * code cleaner, if not more fragile.  In a real app, you'd
+            * want to do this a little more robust :-)  See
+            * include/linux/sched.h for mode details */
+
+            /* NOTE: _EPROCESS.UniqueProcessId is a really VOID*, but is never > 32 bits,
+            * so this is safe enough for x64 Windows for example purposes */
+            vmi_read_32_va(vmi, current_process + pid_offset, 0, (uint32_t*)&pid);
+
+            procname = vmi_read_str_va(vmi, current_process + name_offset, 0);
+
+            if (!procname) {
+                printf("Failed to find procname\n");
+                break;
+            }
+
+            /* print out the process name */
+            printf("[%5d] %s (struct addr:%"PRIx64")\n", pid, procname, current_process);
+            if (procname) {
+                free(procname);
+                procname = NULL;
+            }
+
+            if ((VMI_OS_FREEBSD == os || VMI_OS_OSX == os) && next_list_entry == list_head) {
+                break;
+            }
+
+            /* follow the next pointer */
+            cur_list_entry = next_list_entry;
+            status = vmi_read_addr_va(vmi, cur_list_entry, 0, &next_list_entry);
+            if (status == VMI_FAILURE) {
+                printf("Failed to read next pointer in loop at %"PRIx64"\n", cur_list_entry);
+                break;
+            }
+            /* In Windows, the next pointer points to the head of list, this pointer is actually the
+            * address of PsActiveProcessHead symbol, not the address of an ActiveProcessLink in
+            * EPROCESS struct.
+            * It means in Windows, we should stop the loop at the last element in the list, while
+            * in Linux, we should stop the loop when coming back to the first element of the loop
+            */
+            if (VMI_OS_WINDOWS == os && next_list_entry == list_head) {
+                break;
+            } else if (VMI_OS_LINUX == os && cur_list_entry == list_head) {
+                break;
+            }
+        }
+
+        i++;
+        printf("Loop %d\n", i);
+        sleep(1);
     }
-
-    /* walk the task list */
-    while (!interrupted) {
-
-        current_process = cur_list_entry - tasks_offset;
-
-        /* Note: the task_struct that we are looking at has a lot of
-         * information.  However, the process name and id are burried
-         * nice and deep.  Instead of doing something sane like mapping
-         * this data to a task_struct, I'm just jumping to the location
-         * with the info that I want.  This helps to make the example
-         * code cleaner, if not more fragile.  In a real app, you'd
-         * want to do this a little more robust :-)  See
-         * include/linux/sched.h for mode details */
-
-        /* NOTE: _EPROCESS.UniqueProcessId is a really VOID*, but is never > 32 bits,
-         * so this is safe enough for x64 Windows for example purposes */
-        vmi_read_32_va(vmi, current_process + pid_offset, 0, (uint32_t*)&pid);
-
-        procname = vmi_read_str_va(vmi, current_process + name_offset, 0);
-
-        if (!procname) {
-            printf("Failed to find procname\n");
-            // goto error_exit;
-            
-            sleep(1);
-            cur_list_entry = list_head;
-            continue;
-
-        }
-
-        /* print out the process name */
-        printf("[%5d] %s (struct addr:%"PRIx64")\n", pid, procname, current_process);
-        if (procname) {
-            free(procname);
-            procname = NULL;
-        }
-
-        if ((VMI_OS_FREEBSD == os || VMI_OS_OSX == os) && next_list_entry == list_head) {
-            break;
-        }
-
-        /* follow the next pointer */
-        cur_list_entry = next_list_entry;
-        status = vmi_read_addr_va(vmi, cur_list_entry, 0, &next_list_entry);
-        if (status == VMI_FAILURE) {
-            printf("Failed to read next pointer in loop at %"PRIx64"\n", cur_list_entry);
-            // goto error_exit;
-
-            sleep(1);
-            cur_list_entry = list_head;
-            continue;
-
-        }
-        /* In Windows, the next pointer points to the head of list, this pointer is actually the
-         * address of PsActiveProcessHead symbol, not the address of an ActiveProcessLink in
-         * EPROCESS struct.
-         * It means in Windows, we should stop the loop at the last element in the list, while
-         * in Linux, we should stop the loop when coming back to the first element of the loop
-         */
-        if (VMI_OS_WINDOWS == os && next_list_entry == list_head) {
-            break;
-        } else if (VMI_OS_LINUX == os && cur_list_entry == list_head) {
-            // break;
-
-            sleep(1);
-            continue;
-
-        }
-    };
 
     retcode = 0;
 error_exit:
