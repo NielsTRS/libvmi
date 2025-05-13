@@ -31,11 +31,22 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <getopt.h>
+#include <unistd.h>
+#include <signal.h>
 
 #include <libvmi/libvmi.h>
 
+volatile bool interrupted = false;
+
+void handle_sigint(int sig) {
+    printf("Received SIGINT %d, exiting...\n", sig);
+    interrupted = true;
+}
+
 int main (int argc, char **argv)
 {
+    signal(SIGINT, handle_sigint);
+
     vmi_instance_t vmi = {0};
     addr_t list_head = 0, cur_list_entry = 0, next_list_entry = 0;
     addr_t current_process = 0;
@@ -109,11 +120,20 @@ int main (int argc, char **argv)
             }
     }
 
+    /* profiling */
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     /* initialize the libvmi library */
     if (VMI_FAILURE == vmi_init_complete(&vmi, input, init, init_data, config_type, config, NULL)) {
         printf("Failed to init LibVMI library.\n");
         goto error_exit;
     }
+
+    /* profiling */
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    long elapsed = (end.tv_sec - start.tv_sec) * 1000000000 + (end.tv_nsec - start.tv_nsec);
+    printf("LibVMI init time (seconds.nanoseconds): %ld.%09ld\n", elapsed / 1000000000, elapsed % 1000000000);
 
     /* init the offset values */
     if (VMI_OS_LINUX == vmi_get_ostype(vmi)) {
@@ -145,10 +165,10 @@ int main (int argc, char **argv)
     }
 
     /* pause the vm for consistent memory access */
-    if (vmi_pause_vm(vmi) != VMI_SUCCESS) {
+    /*if (vmi_pause_vm(vmi) != VMI_SUCCESS) {
         printf("Failed to pause VM\n");
         goto error_exit;
-    } // if
+    }*/ // if
 
     /* demonstrate name and id accessors */
     char *name2 = vmi_get_name(vmi);
@@ -209,7 +229,7 @@ int main (int argc, char **argv)
     }
 
     /* walk the task list */
-    while (1) {
+    while (!interrupted) {
 
         current_process = cur_list_entry - tasks_offset;
 
@@ -230,7 +250,12 @@ int main (int argc, char **argv)
 
         if (!procname) {
             printf("Failed to find procname\n");
-            goto error_exit;
+            // goto error_exit;
+            
+            sleep(1);
+            cur_list_entry = list_head;
+            continue;
+
         }
 
         /* print out the process name */
@@ -249,7 +274,12 @@ int main (int argc, char **argv)
         status = vmi_read_addr_va(vmi, cur_list_entry, 0, &next_list_entry);
         if (status == VMI_FAILURE) {
             printf("Failed to read next pointer in loop at %"PRIx64"\n", cur_list_entry);
-            goto error_exit;
+            // goto error_exit;
+
+            sleep(1);
+            cur_list_entry = list_head;
+            continue;
+
         }
         /* In Windows, the next pointer points to the head of list, this pointer is actually the
          * address of PsActiveProcessHead symbol, not the address of an ActiveProcessLink in
@@ -260,14 +290,18 @@ int main (int argc, char **argv)
         if (VMI_OS_WINDOWS == os && next_list_entry == list_head) {
             break;
         } else if (VMI_OS_LINUX == os && cur_list_entry == list_head) {
-            break;
+            // break;
+
+            sleep(1);
+            continue;
+
         }
     };
 
     retcode = 0;
 error_exit:
     /* resume the vm */
-    vmi_resume_vm(vmi);
+    //vmi_resume_vm(vmi);
 
     /* cleanup any memory associated with the LibVMI instance */
     vmi_destroy(vmi);
@@ -276,6 +310,7 @@ error_exit:
         free(init_data->entry[0].data);
         free(init_data);
     }
+    printf("Exiting process-list example\n");
 
     return retcode;
 }
