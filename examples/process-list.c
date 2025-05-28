@@ -60,6 +60,7 @@ int main (int argc, char **argv)
     void *input = NULL, *config = NULL;
     int retcode = 1;
     int i = 0;
+    int failed_count = 0;
 
     if ( argc < 2 ) {
         printf("Usage: %s\n", argv[0]);
@@ -213,9 +214,17 @@ int main (int argc, char **argv)
     }
 
     while(!interrupted){
+
+        if (failed_count > 5) {
+            printf("Failed to read head pointer too many times, exiting...\n");
+            goto error_exit;
+        }
+        
         cur_list_entry = list_head;
         if (VMI_FAILURE == vmi_read_addr_va(vmi, cur_list_entry, 0, &next_list_entry)) {
-            printf("Failed to read next pointer at %"PRIx64"\n", cur_list_entry);
+            printf("Failed to read head pointer at %"PRIx64"\n", cur_list_entry);
+            failed_count++;
+            // sleep(1);
             continue;
         }
 
@@ -225,7 +234,9 @@ int main (int argc, char **argv)
             // Advance the pointer once
             status = vmi_read_addr_va(vmi, cur_list_entry, 0, &cur_list_entry);
             if (status == VMI_FAILURE) {
-                printf("Failed to read next pointer at %"PRIx64"\n", cur_list_entry);
+                printf("Failed to read head pointer at %"PRIx64"\n", cur_list_entry);
+                failed_count++;
+                // sleep(1);
                 continue;
             }
         }
@@ -288,7 +299,8 @@ int main (int argc, char **argv)
 
         i++;
         printf("Loop %d\n", i);
-        sleep(1);
+        vmi_pagecache_flush(vmi);
+        // sleep(1);
     }
 
     retcode = 0;
